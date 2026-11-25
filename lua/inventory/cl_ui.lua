@@ -1,4 +1,4 @@
-local COL_EMPTY  = Color(55, 55, 55, 255)
+﻿local COL_EMPTY  = Color(55, 55, 55, 255)
 local COL_FULL   = Color(80, 180, 80, 255)
 local COL_BG     = Color(80, 80, 80, 255)
 local COL_TEXT   = Color(225, 225, 225, 255)
@@ -29,6 +29,11 @@ end
 
 local function CellMax()
     return PanelH() * 0.05
+end
+
+-- 容器页内部的上下留白：每页总高增加 ScrH()*0.01，上下各一半
+local function PagePad()
+    return ScrH() * 0.005
 end
 
 -- 每个容器面板左侧预留 2x2 格的背包图标区，网格整体右移这么多格
@@ -184,7 +189,7 @@ local function ItemUnderCursor( pnl )
 
     local mx, my = pnl:ScreenToLocal(gui.MouseX(), gui.MouseY())
     local cx = math.floor((mx - 2 - offsetX) / cell) + 1
-    local cy = math.floor((my - 2) / cell) + 1
+    local cy = math.floor((my - PagePad() - 2) / cell) + 1
 
     if cx < 1 then return end      -- 落在左侧图标区
 
@@ -330,6 +335,7 @@ local function StartDrag( hit, panel )
     if not cell then return end
 
     drag = {
+        kind      = "item",                   -- 来源是背包格子
         classname = hit.classname,
         def       = hit.def,
         rot       = hit.rot == true,          -- 该物品当前是否旋转（拖动中可按 R 切换）
@@ -377,7 +383,7 @@ local function AnchorCellAtCursor( pnl, n, fw, fh )
 
     -- 取「占格中心最接近鼠标」的那个锚点（偶数宽高时是半格取舍，四舍五入最贴合图标）
     local cx = math.floor( ( left - 2 - offsetX ) / cell + 0.5 ) + 1
-    local cy = math.floor( ( top  - 2 ) / cell + 0.5 ) + 1
+    local cy = math.floor( ( top  - PagePad() - 2 ) / cell + 0.5 ) + 1
     return cx, cy
 end
 
@@ -416,10 +422,222 @@ local function CancelDrag()
     drag = nil
 end
 
+-- ======================= 掉落物面板 / 拾取（PickUp） =======================
+-- 服务端已有 PickUp opration：{ index = 实体索引 }，内部走 ENT:Use →
+-- InventoryAddItem(classname)，也就是"自动找第一个空位"，不接收指定格子。
+-- 所以这里的预测和预览都用同一套自动找位，保证客户端预览 = 服务端落点。
+local PICKUP_RANGE      = 104                     -- 与服务端 PickUp 的 72 单位一致
+local PICKUP_HIDE_TIME  = 2                       -- 发包后先把实体藏这么久
+local DROP_REFRESH      = 0.25                    -- 实体列表的刷新间隔
+
+local drop_board                                  -- 面板本体（CreateDropPanel 里赋值）
+local drop_items, drop_items_time = {}, -1
+
+-- 刚发过 PickUp 的实体先不显示，等服务端把它删掉。
+-- 弱键：实体被删后条目自动消失，不会留垃圾。
+local picked_ents = setmetatable( {}, { __mode = "k" } )
+
+local function LocalPly()
+    local ply = LocalPlayer()
+    if IsValid( ply ) then return ply end
+end
+
+-- 客户端还没有任何容器：不做预测，直接交给服务端
+local function CanPredictPickup()
+    return next( INVENTORY ) ~= nil
+end
+
+-- 预测这次拾取会落到哪个格：与服务端 ENT:Use → InventoryAddItem(classname) 等价
+local function PredictPickupSlot( classname )
+    local ply = LocalPly()
+    if not ply or not classname then return end
+    if not CanPredictPickup() then return end
+    return ply:InventoryValid( classname, nil, nil, nil, false )
+end
+
+local function RefreshDropItems()
+    local list = {}
+    local now  = CurTime()
+
+    local ply = LocalPly()
+    if ply then
+        local origin = ply:GetPos()
+        local range  = PICKUP_RANGE^2
+
+        for _, ent in ipairs( ents.FindByClass( "prop_item" ) ) do
+            if IsValid( ent ) then
+                local sent = picked_ents[ ent ]
+                if sent and now - sent > PICKUP_HIDE_TIME then
+                    picked_ents[ ent ] = nil      -- 服务端没删：可能被拒绝了，重新显示
+                    sent = nil
+                end
+
+                if not sent then
+                    local classname = ent:GetNWString( "ITEMclass", "" )
+                    local def = ITEM_LIST[ classname ]
+                    if def and ( ent:GetPos() - origin ):LengthSqr() <= range then
+                        list[ #list + 1 ] = { ent = ent, classname = classname, def = def }
+                    end
+                end
+            end
+        end
+    end
+
+    drop_items, drop_items_time = list, now
+    if IsValid( drop_board ) then drop_board:InvalidateLayout() end
+    return list
+end
+
+local function DropItems()
+    if CurTime() - drop_items_time >= DROP_REFRESH then return RefreshDropItems() end
+    return drop_items
+end
+
+-- 把掉落物按阅读顺序打进一个虚拟网格（实体没有朝向，不旋转）
+-- 返回 cols, cell, rows, slots（slots[i] = { x, y, w, h }）
+local function DropLayout( w, items )
+    local pad   = 4
+    local avail = math.max( 1, w - pad )
+    local unit  = math.max( 1, CellMax() )
+
+    -- 列数：至少容纳最宽的物品，再按 CellMax 尽量多排几列
+    local maxIw = 1
+    for i = 1, #items do
+        maxIw = math.max( maxIw, items[i].def.X or 1 )
+    end
+
+    local cols = math.max( maxIw, math.floor( avail / unit ) )
+    if cols < 1 then cols = 1 end
+
+    local cell = math.min( unit, avail / cols )
+    if cell <= 0 then cell = 1 end
+
+    local used, slots = {}, {}
+    local rows = 0
+
+    for i = 1, #items do
+        local def = items[i].def
+        local iw, ih = def.X or 1, def.Y or 1
+        local place
+
+        -- 逐行逐列找第一块放得下的矩形；rows+1 之后一定是空的
+        for ty = 1, rows + 1 do
+            for tx = 1, cols - iw + 1 do
+                local free = true
+                for yy = ty, ty + ih - 1 do
+                    for xx = tx, tx + iw - 1 do
+                        if used[xx] and used[xx][yy] then free = false break end
+                    end
+                    if not free then break end
+                end
+                if free then place = { x = tx, y = ty } break end
+            end
+            if place then break end
+        end
+
+        if place then
+            for xx = place.x, place.x + iw - 1 do
+                used[xx] = used[xx] or {}
+                for yy = place.y, place.y + ih - 1 do
+                    used[xx][yy] = i
+                end
+            end
+            rows = math.max( rows, place.y + ih - 1 )
+            slots[i] = { x = place.x, y = place.y, w = iw, h = ih }
+        end
+    end
+
+    return cols, cell, rows, slots
+end
+
+-- 面板的一次可视布局：把网格整体摆到面板中央。
+-- 返回 cols, cell, rows, slots, drawRows, ox, oy
+--   drawRows：实际要画的行数（物品少时按可视区域补满）
+--   ox / oy ：网格左上角在面板内的坐标（水平、垂直都居中）
+local function DropView( bw, bh, items )
+    local cols, cell, rows, slots = DropLayout( bw, items )
+
+    local titleH   = cell                                     -- 顶部标题占 1 行
+    local visRows  = math.floor( math.max( 0, bh - titleH ) / cell )
+    local drawRows = math.max( rows, visRows )
+
+    local gw = cols * cell
+    local gh = drawRows * cell
+
+    local ox = ( bw - gw ) * 0.5
+    local oy = titleH + math.max( 0, ( bh - titleH - gh ) * 0.5 )
+
+    return cols, cell, rows, slots, drawRows, ox, oy
+end
+
+-- 鼠标下的掉落物序号；没命中返回 nil（ox/oy 是网格原点）
+local function DropHitTest( items, slots, cell, ox, oy, mx, my )
+    local cx = math.floor( ( mx - ox ) / cell ) + 1
+    local cy = math.floor( ( my - oy ) / cell ) + 1
+    if cx < 1 or cy < 1 then return end
+
+    for i = 1, #items do
+        local s = slots[ i ]
+        if s and cx >= s.x and cx < s.x + s.w and cy >= s.y and cy < s.y + s.h then
+            return i
+        end
+    end
+end
+
+local function StartEntityDrag( entry, cell )
+    if drag or not entry or not entry.def then return end
+    if not IsValid( entry.ent ) then return end
+
+    drag = {
+        kind      = "ent",                -- 来源是地上的物品实体
+        ent       = entry.ent,
+        classname = entry.classname,
+        def       = entry.def,
+        rot       = false,                -- 实体没有朝向，拖动中按 R 无效
+        rot0      = false,
+        cell      = cell,
+    }
+end
+
+-- 真正执行一次拾取：预测 + 发包。成功返回 true。
+-- 拖拽松手（FinishEntityDrag）和 Ctrl+左键（面板 OnMousePressed）都走这里。
+local function TryPickupEntity( ent, classname )
+    if not IsValid( ent ) or not classname then return false end
+    if picked_ents[ ent ] then return false end          -- 已经发过包，等结果
+
+    local ply = LocalPly()
+    if not ply then return false end
+
+    if CanPredictPickup() then
+        -- ① 先确认放得下（同时就是预览用的那份结果）
+        if not PredictPickupSlot( classname ) then return false end
+        -- ② 预测写入本地背包；OnPickUp 拒绝 / 没空位都会返回 false
+        if not ply:InventoryAddItem( classname ) then return false end
+
+        picked_ents[ ent ] = CurTime()
+        RefreshDropItems()                                 -- 立刻从面板上消失
+    end
+
+    net.Start( "inventory_sys_inventory_oprations" )
+    net.WriteString( "PickUp" )
+    net.WriteTable( { index = ent:EntIndex() } )
+    net.SendToServer()
+    return true
+end
+
+-- 松手：必须落在某个容器面板上；预测和服务端一样"自动找第一个空位"
+local function FinishEntityDrag( d )
+    if not IsValid( d.ent ) then return end                -- 拖动过程中被别人捡走了
+    if not ContainerPanelUnderCursor() then return end     -- 丢在界面空白处：取消
+    TryPickupEntity( d.ent, d.classname )
+end
+
 local function FinishDrag()
     local d = drag
     drag = nil
     if not d then return end
+
+    if d.kind == "ent" then return FinishEntityDrag( d ) end   -- 从掉落物面板拖来
 
     local pnl, n = ContainerPanelUnderCursor()
     if not pnl then return end                     -- 丢到界面外：取消
@@ -459,9 +677,9 @@ hook.Add( "Think", "new_moon_inventory_drag", function()
     if not IsValid( inv_frame ) then CancelDrag() return end
     if input.IsKeyDown( KEY_ESCAPE ) then CancelDrag() return end
 
-    -- 拖动中按 R 旋转
+    -- 拖动中按 R 旋转（实体没有朝向，按住 R 对掉落物无效）
     local down = input.IsKeyDown( KEY_R )
-    if down and not rKeyDown then RotateDrag() end
+    if down and not rKeyDown and drag.kind ~= "ent" then RotateDrag() end
     rKeyDown = down
 
     if not input.IsMouseDown( MOUSE_LEFT ) then FinishDrag() end
@@ -533,13 +751,14 @@ local function CreateContainerPanel( n )
         local iconH = ICON_ROWS * cell
         local pad = math.min(4, cell * 0.5)      -- 小尺寸时避免出现负宽高
         local inner = math.max(1, cell - pad)
+        local padY = PagePad()                   -- 页内上下留白
 
         draw.RoundedBox(2, 0, 0, w, h, COL_BG)
 
         -- 左侧：背包图标槽（2 行）+ 名字槽（1 行）
-        draw.RoundedBox(2, 2, 2, math.max(1, offsetX - 4), math.max(1, iconH - 4), COL_EMPTY)
+        draw.RoundedBox(2, 2, 2 + padY, math.max(1, offsetX - 4), math.max(1, iconH - 4), COL_EMPTY)
 
-        local nameX, nameY = 2, iconH + 2
+        local nameX, nameY = 2, iconH + 2 + padY
         local nameW, nameH = math.max(1, offsetX - 4), inner
         draw.RoundedBox(2, nameX, nameY, nameW, nameH, COL_EMPTY)
 
@@ -559,7 +778,7 @@ local function CreateContainerPanel( n )
                 surface.SetDrawColor(grid[x][y] and COL_FULL or COL_EMPTY)
                 surface.DrawRect(
                     offsetX + (x - 1) * cell + 2,
-                    (y - 1) * cell + 2,
+                    padY + (y - 1) * cell + 2,
                     inner, inner
                 )
             end
@@ -578,7 +797,7 @@ local function CreateContainerPanel( n )
                         if rot then w, h = h, w end
 
                         local px = offsetX + (x - 1) * cell + 2
-                        local py = (y - 1) * cell + 2
+                        local py = padY + (y - 1) * cell + 2
                         local pw = math.max(1, w * cell - 4)
                         local ph = math.max(1, h * cell - 4)
 
@@ -614,7 +833,47 @@ local function CreateContainerPanel( n )
                     end
                     surface.DrawRect(
                         offsetX + ( x1 - 1 ) * cell + 2,
-                        ( y1 - 1 ) * cell + 2,
+                        padY + ( y1 - 1 ) * cell + 2,
+                        math.max(1, ( x2 - x1 + 1 ) * cell - 4),
+                        math.max(1, ( y2 - y1 + 1 ) * cell - 4)
+                    )
+                end
+            end
+        end
+
+        -- 从掉落物面板拖进来：预览服务端"自动找第一个空位"的真实落点。
+        -- 服务端 PickUp 不接收指定格子，所以这里不跟随鼠标，只标出最终落点。
+        if drag and drag.kind == "ent" and drag.def then
+            local pn, px, py = PredictPickupSlot( drag.classname )
+            local iw, ih = drag.def.X or 1, drag.def.Y or 1
+
+            if pn then
+                -- 落点在本容器：蓝框
+                if pn == n then
+                    local x1, y1 = math.max( px, 1 ), math.max( py, 1 )
+                    local x2, y2 = math.min( px + iw - 1, gw ), math.min( py + ih - 1, gh )
+                    if x2 >= x1 and y2 >= y1 then
+                        surface.SetDrawColor( 120, 200, 255, 90 )
+                        surface.DrawRect(
+                            offsetX + ( x1 - 1 ) * cell + 2,
+                            padY + ( y1 - 1 ) * cell + 2,
+                            math.max(1, ( x2 - x1 + 1 ) * cell - 4),
+                            math.max(1, ( y2 - y1 + 1 ) * cell - 4)
+                        )
+                    end
+                end
+            elseif ContainerPanelUnderCursor() == pnl then
+                -- 整个背包都没地方：在鼠标下的格子上标红
+                local mx, my = pnl:ScreenToLocal( gui.MouseX(), gui.MouseY() )
+                local tx = math.floor( ( mx - 2 - offsetX ) / cell ) + 1
+                local ty = math.floor( ( my - PagePad() - 2 ) / cell ) + 1
+                local x1, y1 = math.max( tx, 1 ), math.max( ty, 1 )
+                local x2, y2 = math.min( tx + iw - 1, gw ), math.min( ty + ih - 1, gh )
+                if x2 >= x1 and y2 >= y1 then
+                    surface.SetDrawColor( 230, 80, 80, 100 )
+                    surface.DrawRect(
+                        offsetX + ( x1 - 1 ) * cell + 2,
+                        padY + ( y1 - 1 ) * cell + 2,
                         math.max(1, ( x2 - x1 + 1 ) * cell - 4),
                         math.max(1, ( y2 - y1 + 1 ) * cell - 4)
                     )
@@ -643,12 +902,13 @@ local function CreateContainerPanel( n )
         -- 左侧高度 = 图标 2 行 + 名字 1 行
         -- 在 PerformLayout 里改自身尺寸会再次触发布局，只在真的变了时才 SetTall，
         -- 否则每帧都会重排一次（DScrollPanel 的 Dock 布局会跟着抖动）
-        local tall = math.max(gh, ICON_ROWS + NAME_ROWS) * cell
+        -- 左侧高度 = 图标 2 行 + 名字 1 行；整页再上下各留 PagePad()
+        local tall = math.max(gh, ICON_ROWS + NAME_ROWS) * cell + PagePad() * 2
         if math.abs(self:GetTall() - tall) >= 1 then
             self:SetTall(tall)
         end
 
-        icon:SetPos(2, 2)
+        icon:SetPos(2, 2 + PagePad())
         icon:SetSize(math.max(1, offsetX - 4), math.max(1, iconH - 4))
 
         -- 容器类变化时才重新设图
@@ -718,6 +978,117 @@ function inventory_cl_sync_containers()
     end
 end
 
+-- 掉落物面板：显示 PICKUP_RANGE 内的 prop_item 实体，可以在里面按住拖到背包上拾取。
+-- 面板本身尺寸随可用区域变化（列数由宽度算），行数随物品数量增长，超出就滚动。
+local function CreateDropPanel( parent, x, y, w, h )
+    local scroll = vgui.Create( "DScrollPanel", parent )
+    scroll:SetPos( x, y )
+    scroll:SetSize( w, h )
+    scroll.Paint = function( self, sw, sh )
+        draw.RoundedBox( 2, 0, 0, sw, sh, COL_BG )
+    end
+
+    local board = vgui.Create( "DPanel" )
+    board:Dock( TOP )
+    board:SetMouseInputEnabled( true )
+    scroll:AddItem( board )
+
+    drop_board = board
+
+    board.Paint = function( self, bw, bh )
+        local items = DropItems()
+        local cols, cell, _, slots, drawRows, ox, oy = DropView( bw, bh, items )
+
+        draw.SimpleText( "      掉落物", GetNameFont(),
+            4, cell * 0.5, COL_TEXT, TEXT_ALIGN_LEFT, TEXT_ALIGN_CENTER )
+
+        -- 空格底板：整块网格居中摆放，物品少时也把可视区域铺满
+        for x2 = 1, cols do
+            for y2 = 1, drawRows do
+                surface.SetDrawColor( COL_EMPTY )
+                surface.DrawRect(
+                    ox + ( x2 - 1 ) * cell + 1,
+                    oy + ( y2 - 1 ) * cell + 1,
+                    math.max(1, cell - 2),
+                    math.max(1, cell - 2)
+                )
+            end
+        end
+
+        if #items == 0 then return end
+
+        -- 物品图标（实体没有朝向，不需要旋转绘制）
+        for i = 1, #items do
+            local s = slots[ i ]
+            local mat = GetIcon( items[i].def.icon )
+            if s and mat then
+                local pw = math.max(1, s.w * cell - 4)
+                local ph = math.max(1, s.h * cell - 4)
+
+                surface.SetMaterial( mat )
+                surface.SetDrawColor( 255, 255, 255, 255 )
+                surface.DrawTexturedRect(
+                    ox + ( s.x - 1 ) * cell + 2,
+                    oy + ( s.y - 1 ) * cell + 2,
+                    pw, ph
+                )
+            end
+        end
+
+        -- 鼠标下的那一项：高亮，提示可以拖
+        local mx, my = self:ScreenToLocal( gui.MouseX(), gui.MouseY() )
+        local hover = DropHitTest( items, slots, cell, ox, oy, mx, my )
+        if hover then
+            local s = slots[ hover ]
+            surface.SetDrawColor( 120, 200, 255, 70 )
+            surface.DrawRect(
+                ox + ( s.x - 1 ) * cell + 1,
+                oy + ( s.y - 1 ) * cell + 1,
+                math.max(1, s.w * cell - 2),
+                math.max(1, s.h * cell - 2)
+            )
+        end
+    end
+
+    board.PerformLayout = function( self, bw, bh )
+        local items = DropItems()
+        local _, cell, rows = DropLayout( bw, items )
+
+        -- 标题 1 行 + 网格（没有物品时也留出标题行）
+        local need = cell * ( math.max( rows, 1 ) + 1 )
+
+        -- 物品少的时候把面板撑满可视区域（格子铺满），物品更多时才继续往下长
+        local visH = 0
+        if IsValid( scroll ) then visH = scroll:GetTall() end
+
+        local tall = math.max( need, visH )
+        if math.abs( self:GetTall() - tall ) >= 1 then
+            self:SetTall( tall )
+        end
+    end
+
+    -- 左键：按住 Ctrl 直接捡起；否则拖拽
+    board.OnMousePressed = function( self, key )
+        if key ~= MOUSE_LEFT then return end
+
+        local items = DropItems()
+        local _, cell, _, slots, _, ox, oy = DropView( self:GetWide(), self:GetTall(), items )
+        local mx, my = self:ScreenToLocal( gui.MouseX(), gui.MouseY() )
+        local hit = DropHitTest( items, slots, cell, ox, oy, mx, my )
+        if not hit then return end
+
+        local entry = items[ hit ]
+        if input.IsControlDown() then
+            TryPickupEntity( entry.ent, entry.classname )     -- 直接捡起，不用拖
+            return
+        end
+
+        StartEntityDrag( entry, cell )
+    end
+
+    return scroll
+end
+
 function inventory_cl_inventory_ui()
     if IsValid(inv_frame) then inv_frame:Close() end
 
@@ -742,7 +1113,7 @@ function inventory_cl_inventory_ui()
     quit:SetPos(DermaPanel:GetWide() - quit:GetWide() - 8, 8)
     quit.DoClick = function() DermaPanel:Close() end
 
-    local RESERVE_RIGHT  = 0.35    -- 右侧预留空白区域，占整个面板宽度的比例
+    local RESERVE_RIGHT  = 0.36    -- 右侧预留空白区域，占整个面板宽度的比例
     local INVENTORY_LEFT = 0.35   -- 背包区左边界（与加入 40% 空白之前的左端对齐）
 
     local inventories = vgui.Create("DScrollPanel", DermaPanel)
@@ -770,6 +1141,18 @@ function inventory_cl_inventory_ui()
     inv_panels = {}
 
     inventory_cl_sync_containers()
+
+    -- 右侧预留区的下 60%（再收掉 5% 主面板高度）：附近掉落物面板，拖到背包上即尝试拾取
+    local DROP_GAP = PANEL_W * 0.006                                -- 与左侧容器面板、主面板右边缘各留这么多
+    local RIGHT_X = PANEL_W * ( 1 - RESERVE_RIGHT ) + DROP_GAP
+    local RIGHT_W = PANEL_W * RESERVE_RIGHT - DROP_GAP * 2
+    local REGION_Y = PANEL_H * 0.02
+    local REGION_H = PANEL_H - REGION_Y - PANEL_H * 0.009
+
+    local DROP_Y = REGION_Y + REGION_H * 0.4      -- 右侧区域的下 60% 的顶边
+    local DROP_H = REGION_H * 0.55                -- 下 60% 再收 5% 主面板高（基数差 1px，直接取 55%）
+
+    CreateDropPanel( DermaPanel, RIGHT_X, DROP_Y, RIGHT_W, DROP_H )
 
     -- 拖拽图标层：盖住整个界面（鼠标穿透），保证拖动的图标不会被面板挡住
     local layer = vgui.Create( "DPanel", DermaPanel )

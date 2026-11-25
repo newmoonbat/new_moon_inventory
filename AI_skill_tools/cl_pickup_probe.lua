@@ -1,4 +1,4 @@
---[[ ==========================================================================
+﻿--[[ ==========================================================================
     cl_pickup_probe.lua —— 客户端预测 InventoryAddItem 的 OnPickUp 判定
     这个探针加载的是"真实"的 lua/autorun/inventory_sys_item.lua 与
     lua/autorun/client/inventory_cl_init.lua，只把 GMod 运行时换成桩，
@@ -71,6 +71,10 @@ function inventory_cl_inventory_ui() end
 T.load("autorun/inventory_sys_item.lua")            -- 共享层：ITEM / ITEM_LIST / ITEM:OnPickUp
 T.load("autorun/client/inventory_cl_init.lua")      -- 被测：meta:InventoryAddItem
 
+-- 探针自己注册一个"永远拒绝拾取"的类，不依赖注册表里 item_test 的当前配置
+ITEM:new({ classname = "item_reject", X = 2, Y = 2,
+    func = { OnPickUp = function() return false end } })
+
 -- ==================== 假玩家 ====================
 local function NewPlayer()
     local p = setmetatable({ sid = "76561190000000000" }, { __index = playerMeta })
@@ -106,11 +110,11 @@ T.eq("锚点格 = {classname, r}", g[1][1].classname .. ":" .. tostring(g[1][1].
 T.eq("锚点索引失效 1 次", clearCount, 1)
 T.eq("占用格数", Occupied(g), 1)
 
--- ===== 2) OnPickUp 返回 false（item_test 恒 false，2x2）=====
+-- ===== 2) OnPickUp 返回 false（item_reject 恒 false，2x2）=====
 g = FreshGrid(6, 3)
 clearCount = 0
-ok = ply:InventoryAddItem("item_test", 1, 2, 1)
-T.eq("item_test 被拒绝", ok, false)
+ok = ply:InventoryAddItem("item_reject", 1, 2, 1)
+T.eq("item_reject 被拒绝", ok, false)
 T.eq("没留下占位格", Occupied(g), 0)
 T.eq("(2,1) 仍是空格", g[2][1], false)
 T.eq("(3,2) 仍是空格", g[3][2], false)
@@ -118,7 +122,7 @@ T.eq("拒绝时不刷新锚点缓存", clearCount, 0)
 
 -- ===== 3) 自动找位被拒绝：整张网格不动 =====
 g = FreshGrid(6, 3)
-T.eq("自动找位也拒绝", ply:InventoryAddItem("item_test"), false)
+T.eq("自动找位也拒绝", ply:InventoryAddItem("item_reject"), false)
 T.eq("网格零改动", Occupied(g), 0)
 
 -- ===== 4) 旋转后被拒绝：宽高互换的占位也要还原 =====
@@ -143,7 +147,7 @@ T.eq("锚点格是表不是 true", type(g[4][2]), "table")
 
 -- ===== 6) 拒绝之后状态干净：同一位置还能放别的 =====
 g = FreshGrid(6, 3)
-ply:InventoryAddItem("item_test", 1, 1, 1)
+ply:InventoryAddItem("item_reject", 1, 1, 1)
 T.eq("之后 item_base 自动找位成功", ply:InventoryAddItem("item_base"), true)
 T.eq("落在 (1,1)", type(g[1][1]), "table")
 
@@ -151,8 +155,8 @@ T.eq("落在 (1,1)", type(g[1][1]), "table")
 g = FreshGrid(6, 3)
 local snap = ITEM("item_pick_probe"); snap.pos = nil
 T.eq("快照形态加入成功", ply:InventoryAddItem(snap, 1, 5, 3), true)
-local snap2 = ITEM("item_test"); snap2.pos = nil
-T.eq("快照形态 item_test 被拒绝", ply:InventoryAddItem(snap2, 1, 1, 1), false)
+local snap2 = ITEM("item_reject"); snap2.pos = nil
+T.eq("快照形态 item_reject 被拒绝", ply:InventoryAddItem(snap2, 1, 1, 1), false)
 T.eq("只剩 probe 那一格", Occupied(g), 1)
 
 T.finish("cl_pickup_probe")

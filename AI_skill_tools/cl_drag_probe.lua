@@ -1,4 +1,4 @@
---[[ ==========================================================================
+﻿--[[ ==========================================================================
     cl_drag_probe.lua —— 客户端拖拽几何探针
     覆盖 lua/inventory/cl_ui.lua：
       · AnchorCellAtCursor / DragFootprint 的锚点换算（含旋转）
@@ -162,9 +162,11 @@ local cell, offsetX = P.GridCell(pnl, pnl:GetWide(), GW)
 T.eq("cell", cell, 40)
 T.eq("offsetX", offsetX, 80)
 
+local PADY = ScrH() * 0.005   -- 容器页内上下留白（= ScrH()*0.01 的一半）
+
 local function MouseToCell(cx, cy)   -- 鼠标放到第 cx,cy 格的格心（屏幕坐标）
     mouseX = 2 + offsetX + (cx - 1) * cell + cell * 0.5 + pnl._sx
-    mouseY = 2 + (cy - 1) * cell + cell * 0.5 + pnl._sy
+    mouseY = 2 + PADY + (cy - 1) * cell + cell * 0.5 + pnl._sy
     hovered = pnl
 end
 
@@ -231,7 +233,7 @@ DragOf("item_1x1", 3, 3, false); MouseToCell(8, 7)
 RunPaint()
 local prev = log.rect[#log.rect]
 T.eq("可放预览 X", prev.x, offsetX + 7 * cell + 2)
-T.eq("可放预览 Y", prev.y, 6 * cell + 2)
+T.eq("可放预览 Y", prev.y, PADY + 6 * cell + 2)
 T.eq("可放预览为蓝色", log.color[1], 120)
 
 INVENTORY[1][8][7] = { classname = "item_1x1", r = false }

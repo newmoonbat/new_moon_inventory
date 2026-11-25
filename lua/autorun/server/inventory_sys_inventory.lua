@@ -301,8 +301,9 @@ hook.Add( "PlayerInitialSpawn", "inventory_sys_inventory_plyspawn", function( pl
         ply:UpDateINV( n )
     end
 end )
-
-local inventory_sys_oprations = {--大部分客户端操作都从这里引索
+--大部分客户端操作都从这里引索
+--most client-to-server opration index form here
+local inventory_sys_oprations = {
     ["DoItemMethon"] = function(ply,tab)
         local n,x,y,name = tab.n,tab.x,tab.y,tab.methon
         local inv = ply:GetInventory()
@@ -335,6 +336,17 @@ local inventory_sys_oprations = {--大部分客户端操作都从这里引索
         if not istable( item ) then return false end
 
         return item:move2( tonumber( dst.n ), tonumber( dst.x ), tonumber( dst.y ), dst.r )
+    end,
+    ["PickUp"] = function( ply,tab )
+        local index = tab.index
+        local ent = Entity(index)
+        if ent then
+            local plypos = ply:GetPos()
+            local entpos = ent:GetPos()
+            if plypos:DistToSqr(entpos) <= 10816 then--104^2=10816
+                if ent:Use(ply) then return true end
+            end
+        end
     end,
 }
 
