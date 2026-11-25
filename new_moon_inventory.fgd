@@ -1,0 +1,34 @@
+@PointClass base(Targetname, Angles, Origin)  = prop_item : "example entity description, visible in Hammers 'help' Box."
+[
+	ITEMclass(string) 	: "ITEMclass"		: ""	: ""
+	//parent(target_destination)	:"parent" :"" :""
+	//linked_door(target_destination)	:"linked door"	:""	:"expect a prop_door_rotating .when the door is open ,player use keypad will close the door,Enter Input will wont work.when the door is close ,OnPassWordRight will automaticly toggle the door is lock/unlock without you set IO"
+	//	Property_name_2(integer) 	: "Example Integer Name"	: 15		: "Keyvalue Description"
+	//	Property_name_3(float)		: "Example Float Name" 		: "1.5"		: "Keyvalue Description"
+	//	Property_name_4(boolean)	: "Example Boolean Name"	: 1 		: "Keyvalue Description"
+	//	
+	//	Property_name_5(choices) : "second number" : 0 : "Your choice of numbers!" =
+	//	[
+	//		0 : "Default"
+	//		1 : "Something"
+	//		2 : "Another Thing"
+	//	]
+	//
+	//	spawnflags(flags) =
+	//	[
+	//		1 : "A flag"       : 0 // 0 means the flag isn't ticked by default
+	//		2 : "Another flag" : 1 // 1 means the flag is ticked by default
+	//	]
+	//	
+	//	// Inputs
+	//	input TypeIn(string) : "like player typein"
+	//	input Enter(string) : "like player push Enter"
+	//	input SetPassWord(string) : "Set PassWord"
+	//	// Outputs
+	//	output OnPlayerStartTyping(void) : "Fires when player start typing"
+	//	output OnPlayerEndTyping(void) : "Fires when player end typing"
+	//	output OnPassWordRight(void) : "Fires when password is right"
+	//	output OnPassWordWrong(void) : "Fires when password is wrong"
+	//	output OnSomethingElse(void) : "Fires when something else happens"
+
+]
