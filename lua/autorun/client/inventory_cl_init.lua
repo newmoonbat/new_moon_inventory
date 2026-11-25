@@ -1,5 +1,6 @@
 INVENTORY = {}--玩家自己的背包：INVENTORY[n] = 容器 ITEM 实例（数字索引是格子）
 TARGET_INVENTORY = {} --客户端访问的其他容器的缓存
+NEARY_INVENTORY = {}--附件的物品的缓存
 include("inventory/cl_ui.lua")
 
 -- 服务端下发的容器视图 → 客户端 ITEM 实例
@@ -64,14 +65,16 @@ end)
 
 -- 客户端预测版：格子里存的是服务端下发的 classname / true / false，
 -- 判定只剩「格子是否被占」，其余逻辑与服务端逐字一致。
-function meta:InventoryValid(itemClass, n, x, y)
+function meta:InventoryValid(itemClass, n, x, y, r)
     local def = ITEM_LIST[itemClass]
     if type(def) ~= "table" then return false end
 
     -- INVENTORY 恒为表；还没同步到任何容器时下面的循环自然返回 false
     local inv = INVENTORY
 
+    r = r and true or false
     local w, h = def.X or 1, def.Y or 1
+    if r then w, h = h, w end      -- 旋转后宽高互换
 
     -- 指定位置模式：只测 (n, x, y) 这一块矩形
     if n and x and y then
@@ -87,7 +90,7 @@ function meta:InventoryValid(itemClass, n, x, y)
             end
         end
 
-        return n, x, y
+        return n, x, y, r
     end
 
     -- 自动找位模式
@@ -106,7 +109,7 @@ function meta:InventoryValid(itemClass, n, x, y)
                             if not free then break end
                         end
                         if free then
-                            return i, px, py       -- 同一层拿到 3 个值
+                            return i, px, py, r
                         end
                     end
                 end
@@ -120,9 +123,9 @@ end
 
 -- 客户端预测版：与服务端 InventoryAddItem 同构。
 -- 差异只有两处：
---   ① 网格里存 classname 字符串（客户端视图没有 ITEM 实例）
+--   ① 网格里存 { classname, r } 表（客户端拿不到 ITEM 实例）
 --   ② 没有 UpDateINV 可发，正好等服务端的权威包把整只容器覆盖回来
-function meta:InventoryAddItem(INPUT,n,x,y)
+function meta:InventoryAddItem(INPUT,n,x,y,r)
     if not self:IsPlayer() then return false end
 
     -- ① 解析 classname：字符串或表
@@ -138,7 +141,14 @@ function meta:InventoryAddItem(INPUT,n,x,y)
     -- ② 类必须已注册，否则不建实例
     local def = ITEM_LIST[classname]
     if not def then return false end
+
+    if r == nil then
+        r = istable( INPUT ) and istable( INPUT.pos ) and INPUT.pos.r or false
+    end
+    r = r and true or false
+
     local w, h = def.X or 1, def.Y or 1
+    if r then w, h = h, w end      -- 旋转后宽高互换
 
     -- ③ 建预测用实例：只为让 OnPickUp 这类 share 逻辑拿到与服务端相同的 self
     local overrides = {}
@@ -155,38 +165,49 @@ function meta:InventoryAddItem(INPUT,n,x,y)
 
     local writeitem = ITEM( overrides )
     if not writeitem then return false end
-    writeitem.X, writeitem.Y = w, h
+    writeitem.X, writeitem.Y = def.X or 1, def.Y or 1
 
     -- ④ 找位置：传了 n/x/y 就只测那一处，否则自动找第一个空位
     local inv = INVENTORY
 
-    local rn, rx, ry
+    local rn, rx, ry, rr
     if n and x and y then
-        rn, rx, ry = self:InventoryValid( classname, n, x, y )
+        rn, rx, ry, rr = self:InventoryValid( classname, n, x, y, r )
     else
-        rn, rx, ry = self:InventoryValid( classname )
+        rn, rx, ry, rr = self:InventoryValid( classname, nil, nil, nil, r )
     end
 
     if not rn then
         self:message_inventory_full()
         return false
     end
-    n, x, y = rn, rx, ry
+    n, x, y, r = rn, rx, ry, rr or r
 
-    -- ⑤ 写网格：占用格 true，锚点格写 classname
+    -- ⑤ 写网格：占用格 true，锚点格写 { classname, r }
     local grid = inv[n]
     for cx = x, x + w - 1 do
         for cy = y, y + h - 1 do
             grid[cx][cy] = true
         end
     end
-    grid[x][y] = classname
+
+    writeitem.OWNER = self:SteamID64()
+    writeitem.pos = {["n"] = n,["x"] = x,["y"] = y,["r"] = r and true or false}
+
+    -- ⑥ 与服务端一致：OnPickUp 拒绝则不进背包。
+    -- 此时只写了占位格，把它们还原成空格即可（这段格子是 InventoryValid 判空后才写的）。
+    if not writeitem:OnPickUp() then
+        for cx = x, x + w - 1 do
+            for cy = y, y + h - 1 do
+                if grid[cx] then grid[cx][cy] = false end
+            end
+        end
+        return false
+    end
+
+    grid[x][y] = { classname = classname, r = r and true or false }
     inventory_cl_clear_anchor_cache()   -- 预测就地改了格子，锚点索引失效
 
-    -- ⑥ 预测成功：面板每帧重读 INVENTORY[n]，不需要额外刷新
-    writeitem.OWNER = self:SteamID64()
-    writeitem.pos = {["n"] = n,["x"] = x,["y"] = y}
-    writeitem:OnPickUp()   -- func.OnPickUp 是 share 的，与服务端一样跑一次
-
+    -- ⑦ 预测成功：面板每帧重读 INVENTORY[n]，不需要额外刷新
     return true
 end

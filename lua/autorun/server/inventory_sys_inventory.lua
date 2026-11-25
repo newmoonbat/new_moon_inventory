@@ -15,7 +15,7 @@ end
 
 -- 不传 n/x/y：扫描整个背包，返回第一个可放置的位置 n, x, y
 -- 传了 n/x/y：只检测该位置，可放返回 n, x, y，不可放返回 false
-function meta:InventoryValid(IN, n, x, y)
+function meta:InventoryValid(IN, n, x, y, r)
     if istable(IN) then IN = IN.classname end
     local def = ITEM_LIST[IN]
     if type(def) ~= "table" then return false end
@@ -23,7 +23,9 @@ function meta:InventoryValid(IN, n, x, y)
     local inv = self:GetInventory()
     if not inv then return false end     -- 纯查询：不建容器，由调用方负责
 
+    r = r and true or false
     local w, h = def.X or 1, def.Y or 1
+    if r then w, h = h, w end      -- 旋转后宽高互换
 
     -- 指定位置模式：只测 (n, x, y) 这一块矩形
     if n and x and y then
@@ -39,7 +41,7 @@ function meta:InventoryValid(IN, n, x, y)
             end
         end
 
-        return n, x, y
+        return n, x, y, r
     end
 
     -- 自动找位模式
@@ -58,7 +60,7 @@ function meta:InventoryValid(IN, n, x, y)
                             if not free then break end
                         end
                         if free then
-                            return i, px, py       -- 同一层拿到 3 个值
+                            return i, px, py, r       -- 同一层拿到 4 个值
                         end
                     end
                 end
@@ -108,8 +110,12 @@ function meta:UpDateINV(inv_id)
                 inv_classonly[x] = {}
                 for y = 1, #grid[1] do
                     local cell = grid[x][y]
-                    if type( cell ) == "table" then
-                        inv_classonly[x][y] = cell.classname
+                    if type( cell ) == "table" and cell.classname then
+                        -- 锚点格：classname + 是否旋转
+                        inv_classonly[x][y] = {
+                            classname = cell.classname,
+                            r = ( istable( cell.pos ) and cell.pos.r ) and true or false,
+                        }
                     elseif cell == true then
                         inv_classonly[x][y] = true
                     else
@@ -135,7 +141,7 @@ function meta:message_inventory_full()
     net.Send(self)
 end    
 
-function meta:InventoryAddItem(INPUT,n,x,y,UPDATE_dont)
+function meta:InventoryAddItem(INPUT, n, x, y, r, UPDATE_dont)
     if not self:IsPlayer() then return false end
 
     -- ① 解析 classname：字符串或表
@@ -178,42 +184,54 @@ function meta:InventoryAddItem(INPUT,n,x,y,UPDATE_dont)
     end
 
     -- ④ 找位置：传了 n/x/y 就只测那一处，否则自动找第一个空位
-    local rn, rx, ry
+    local n1, x1, y1, r1
     if n and x and y then
-        rn, rx, ry = self:InventoryValid( classname, n, x, y )
+        n1, x1, y1, r1 = self:InventoryValid( classname, n, x, y, r )
     else
-        rn, rx, ry = self:InventoryValid( classname )
+        n1, x1, y1, r1 = self:InventoryValid( classname, nil, nil, nil, r )
     end
 
-    if not rn then
+    if not n1 then
         self:message_inventory_full()
         return false
     end
-    n, x, y = rn, rx, ry
+    n, x, y, r = n1, x1, y1, r1
 
-    -- ⑤ 写网格
+    -- ⑤ 写网格（旋转后宽高互换）
+    local w, h = def.X or 1, def.Y or 1
+    if r then w, h = h, w end
     local grid = inv[n]
-    for cx = x, x + writeitem.X - 1 do
-        for cy = y, y + writeitem.Y - 1 do
+    for cx = x, x + w - 1 do
+        for cy = y, y + h - 1 do
             grid[cx][cy] = true
         end
     end
     writeitem.OWNER = self:SteamID64()
-    writeitem.pos = {["n"] = n,["x"] = x,["y"] = y}
+    writeitem.pos = {["n"] = n,["x"] = x,["y"] = y,["r"] = r and true or false}
+
+    if not writeitem:OnPickUp() then
+        for cx = x, x + w - 1 do
+            for cy = y, y + h - 1 do
+                grid[cx][cy] = false
+            end
+        end
+        return false
+    end
+
     grid[x][y] = writeitem
 
     -- ⑥ 同步；失败则回滚，保证「进背包」和「删实体」不会一半一半
     if not UPDATE_dont then 
         if not self:UpDateINV( n ) then
-            for cx = x, x + writeitem.X - 1 do
-                for cy = y, y + writeitem.Y - 1 do
+            for cx = x, x + w - 1 do
+                for cy = y, y + h - 1 do
                     grid[cx][cy] = false
                 end
             end
             return false
         end
     end
-    grid[x][y]:OnPickUp()
+
     return true
 end
 
@@ -242,43 +260,35 @@ function meta:CreateInventory( containerClassName )
 end
 
 hook.Add("DoPlayerDeath", "inventory_sys_inventory_player_death", function( ply )
-    local inv = INVENTORY[ply:SteamID64()]
+    local inv = INVENTORY[ ply:SteamID64() ]
     if not inv then return end
 
-    local eye = ply:EyeAngles()
-    local fwd = eye:Forward()
-    local pos = ply:GetPos()
-    local ang = ply:GetAngles()
+    local pos, ang = ply:GetPos(), ply:GetAngles()
 
-    for n = 1, #inv do
-        local container = inv[n]
-        if container then
-            if container.classname ~= "container_base" then
-                container:drop( true )       -- 容器本体 + 内容物一起掉落
-            else
-                -- 基础容器只掉内容物，本体留着
-                local contents = {}
-                for x = 1, #container do
-                    for y = 1, #container[x] do
-                        local cell = container[x][y]
-                        if type( cell ) == "table" then
-                            contents[#contents + 1] = table.Copy( cell )
-                        end
-                    end
-                end
+    -- 快照成普通表：后面 drop 会改动 inv 的数组
+    local containers = {}
+    for n = 1, #inv do containers[ #containers + 1 ] = inv[n] end
 
-                for i = 1, #contents do
-                    if not ITEM:Spawn( contents[i], pos, ang, Vector( 0, 0, 0 ) ) then
-                        print( "fail to spawn item entity " .. tostring( contents[i].classname ) )
+    -- 基础容器最后统一掉内容物，避免被上面的 drop 回填污染
+    for i = 1, #containers do
+        local container = containers[i]
+        if container and container.classname ~= "container_base" then
+            container:drop( true )
+        elseif container and container.classname == "container_base" then
+            for x = 1, #container do
+                for y = 1, #container[x] do
+                    local cell = container[x][y]
+                    if type( cell ) == "table" then
+                        ITEM:Spawn( table.Copy( cell ), pos, ang, Vector( 0, 0, 0 ) )
                     end
                 end
             end
         end
     end
 
-    INVENTORY[ply:SteamID64()] = {}
-    ply:CreateInventory("container_base")
-    ply:UpDateINV(-1)
+    INVENTORY[ ply:SteamID64() ] = {}
+    ply:CreateInventory( "container_base" )
+    ply:UpDateINV( -1 )
 end)
 
 hook.Add( "PlayerInitialSpawn", "inventory_sys_inventory_plyspawn", function( ply )
@@ -292,7 +302,7 @@ hook.Add( "PlayerInitialSpawn", "inventory_sys_inventory_plyspawn", function( pl
     end
 end )
 
-local inventory_sys_oprations = {
+local inventory_sys_oprations = {--大部分客户端操作都从这里引索
     ["DoItemMethon"] = function(ply,tab)
         local n,x,y,name = tab.n,tab.x,tab.y,tab.methon
         local inv = ply:GetInventory()
@@ -311,11 +321,20 @@ local inventory_sys_oprations = {
 
         return item:CallMethod( name )
     end,
-    ["Move2"] = function(ply,tab)
+    ["Move2"] = function( ply, tab )
+        local src, dst = tab and tab.item, tab and tab.target
+        if type( src ) ~= "table" or type( dst ) ~= "table" then return false end
+
         local inv = ply:GetInventory()
-        local item = inv[tab.item.n][tab.item.x][tab.item.y]
-        local target = tab.target
-        --target = {n = , x = , y =}
+        if not inv then return false end
+
+        local n, x, y = tonumber( src.n ), tonumber( src.x ), tonumber( src.y )
+        if not n or not x or not y then return false end
+        local col = inv[n] and inv[n][x]
+        local item = col and col[y]
+        if not istable( item ) then return false end
+
+        return item:move2( tonumber( dst.n ), tonumber( dst.x ), tonumber( dst.y ), dst.r )
     end,
 }
 

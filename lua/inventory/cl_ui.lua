@@ -74,6 +74,16 @@ function inventory_cl_clear_anchor_cache()
     end
 end
 
+-- 客户端格子：锚点格是 { classname = "...", r = bool }，占位格是 true，空格是 false
+-- 兼容旧的纯字符串格式
+local function CellItem( cell )
+    if type( cell ) == "table" then
+        return cell.classname, cell.r == true
+    elseif type( cell ) == "string" then
+        return cell, false
+    end
+end
+
 local function AnchorList( grid )
     local list = anchor_cache[ grid ]
     if list then return list end
@@ -83,13 +93,15 @@ local function AnchorList( grid )
         local column = grid[ ax ]
         if column then
             for ay = 1, #column do
-                local classname = column[ ay ]
-                if type( classname ) == "string" then
+                local classname, rot = CellItem( column[ ay ] )
+                if classname then
                     local def = ITEM_LIST[ classname ]
+                    local w, h = ( def and def.X ) or 1, ( def and def.Y ) or 1
+                    if rot then w, h = h, w end        -- 旋转后宽高互换
                     list[ #list + 1 ] = {
                         x = ax, y = ay,
-                        w = ( def and def.X ) or 1,
-                        h = ( def and def.Y ) or 1,
+                        w = w, h = h,
+                        rot = rot,
                         classname = classname,
                         def = def,
                     }
@@ -102,13 +114,13 @@ local function AnchorList( grid )
     return list
 end
 
--- 按坐标反查锚点，返回 锚点x, 锚点y, classname, 类定义
+-- 按坐标反查锚点，返回 锚点x, 锚点y, classname, 类定义, 是否旋转
 local function ItemAnchorAt( grid, x, y )
     local list = AnchorList( grid )
     for i = 1, #list do
         local a = list[ i ]
         if x >= a.x and x < a.x + a.w and y >= a.y and y < a.y + a.h then
-            return a.x, a.y, a.classname, a.def
+            return a.x, a.y, a.classname, a.def, a.rot
         end
     end
 end
@@ -158,7 +170,9 @@ local function HoveredContainerPanel()
     end
 end
 
--- 返回鼠标当前指向的物品：{ kind = "item", n, x, y, cell, offsetX, classname, def }
+-- 返回鼠标当前指向的物品
+-- { kind = "item", n, x, y, rot, cell, offsetX, classname, def }
+-- x/y 是物品的锚点格（鼠标可能落在多格物品的非锚点格上）
 -- 左侧背包图标是独立子面板，不会走到这里
 local function ItemUnderCursor( pnl )
     local n = pnl.ContainerIndex
@@ -174,11 +188,11 @@ local function ItemUnderCursor( pnl )
 
     if cx < 1 then return end      -- 落在左侧图标区
 
-    local ax, ay, classname, def = ItemAnchorAt(grid, cx, cy)
+    local ax, ay, classname, def, rot = ItemAnchorAt(grid, cx, cy)
     if not classname then return end
 
-    return { kind = "item", n = n, x = ax, y = ay, cell = cell,
-             offsetX = offsetX, classname = classname, def = def }
+    return { kind = "item", n = n, x = ax, y = ay, rot = rot,
+             cell = cell, offsetX = offsetX, classname = classname, def = def }
 end
 
 local function SendItemMethod( classname, id, n, x, y )
@@ -300,6 +314,194 @@ local inv_frame
 local inv_scroll
 local inv_panels = {}          -- 容器编号 -> DPanel
 
+-- ============================ 拖拽物品 ============================
+-- 左键按住物品开始，Think 里检测松开，覆盖面板里画跟随鼠标的图标。
+-- 图标始终以「中心对准鼠标」的方式绘制，落点也按同一规则换算锚点。
+-- 松开时把 { item = 来源, target = 目标 } 通过 Move2 发给服务端。
+local drag = nil
+
+local function StartDrag( hit, panel )
+    if not hit or not hit.def then return end
+
+    local grid = INVENTORY[ hit.n ]
+    if not grid or not grid[1] then return end
+
+    local cell = GridCell( panel, panel:GetWide(), #grid )
+    if not cell then return end
+
+    drag = {
+        classname = hit.classname,
+        def       = hit.def,
+        rot       = hit.rot == true,          -- 该物品当前是否旋转（拖动中可按 R 切换）
+        rot0      = hit.rot == true,          -- 拖动开始时的朝向，用于判断是否需要下发
+        cell      = cell,                     -- 来源面板的格宽（兜底用）
+        n = hit.n, x = hit.x, y = hit.y,
+    }
+end
+
+-- 拖动中按 R：顺时针旋转 90°（图标中心始终跟着鼠标，所以只需翻转朝向）
+local function RotateDrag()
+    if not drag then return end
+    drag.rot = not drag.rot
+end
+
+-- 拖拽中物品的占格（旋转后宽高互换）
+local function DragFootprint( d )
+    local w, h = d.def.X or 1, d.def.Y or 1
+    if d.rot then return h, w end
+    return w, h
+end
+
+-- 鼠标下方的容器面板
+local function ContainerPanelUnderCursor()
+    local pnl = vgui.GetHoveredPanel()
+    while IsValid( pnl ) do
+        local n = pnl.ContainerIndex
+        local grid = n and INVENTORY[ n ]
+        if grid and grid[1] then return pnl, n end
+        pnl = pnl:GetParent()
+    end
+end
+
+-- 以「图标中心对准鼠标」的方式，算出锚点所在的格子（返回 cx, cy，可能越界）
+local function AnchorCellAtCursor( pnl, n, fw, fh )
+    local grid = INVENTORY[ n ]
+    if not grid or not grid[1] then return end
+
+    local cell, offsetX = GridCell( pnl, pnl:GetWide(), #grid )
+    if not cell then return end
+
+    local mx, my = pnl:ScreenToLocal( gui.MouseX(), gui.MouseY() )
+    local left = mx - fw * cell * 0.5          -- 图标左上角
+    local top  = my - fh * cell * 0.5
+
+    -- 取「占格中心最接近鼠标」的那个锚点（偶数宽高时是半格取舍，四舍五入最贴合图标）
+    local cx = math.floor( ( left - 2 - offsetX ) / cell + 0.5 ) + 1
+    local cy = math.floor( ( top  - 2 ) / cell + 0.5 ) + 1
+    return cx, cy
+end
+
+-- 目标位置能否放下：把「拖拽中的物品自己占的格子」视为空地，
+-- 这样在自身范围内平移不会被自己挡住；其余被占的格子一律不行。
+local function CanDropAt( n, tx, ty, d )
+    local grid = INVENTORY[ n ]
+    if not grid or not grid[1] or not d or not d.def then return false end
+
+    local w, h = DragFootprint( d )                -- 旋转后宽高互换
+
+    -- 豁免只针对「原来占的格子」：旋转后新覆盖到别人的格子不能被豁免
+    local ow, oh = d.def.X or 1, d.def.Y or 1
+    if d.rot0 then ow, oh = oh, ow end
+
+    local gw, gh = #grid, #grid[1]
+    if tx < 1 or ty < 1 or tx + w - 1 > gw or ty + h - 1 > gh then return false end
+
+    local sameContainer = ( d.n == n )
+
+    for cy = ty, ty + h - 1 do
+        for cx = tx, tx + w - 1 do
+            if grid[cx] and grid[cx][cy] then
+                local ownCell = sameContainer
+                    and cx >= d.x and cx < d.x + ow
+                    and cy >= d.y and cy < d.y + oh
+                if not ownCell then return false end
+            end
+        end
+    end
+
+    return true
+end
+
+local function CancelDrag()
+    drag = nil
+end
+
+local function FinishDrag()
+    local d = drag
+    drag = nil
+    if not d then return end
+
+    local pnl, n = ContainerPanelUnderCursor()
+    if not pnl then return end                     -- 丢到界面外：取消
+
+    local fw, fh = DragFootprint( d )
+    local tx, ty = AnchorCellAtCursor( pnl, n, fw, fh )
+    if not tx then return end
+
+    -- 位置和朝向都没变：什么都不用做
+    if n == d.n and tx == d.x and ty == d.y and d.rot == d.rot0 then return end
+    if not CanDropAt( n, tx, ty, d ) then return end           -- 放不下：什么都不做
+
+    -- 客户端预测：与服务端走同一套 move2
+    if ITEM_LIST[ d.classname ] then
+        local inst = ITEM( d.classname )
+        if inst then
+            inst.pos = { n = d.n, x = d.x, y = d.y, r = d.rot0 }
+            inst:move2( n, tx, ty, d.rot )
+            inventory_cl_clear_anchor_cache()      -- 预测改了格子
+        end
+    end
+
+    net.Start( "inventory_sys_inventory_oprations" )
+    net.WriteString( "Move2" )
+    net.WriteTable( {
+        item   = { n = d.n, x = d.x, y = d.y },
+        target = { n = n,   x = tx,  y = ty, r = d.rot },
+    } )
+    net.SendToServer()
+end
+
+local rKeyDown = false      -- R 的边沿检测：按住只触发一次
+
+hook.Add( "Think", "new_moon_inventory_drag", function()
+    if not drag then rKeyDown = false return end
+
+    if not IsValid( inv_frame ) then CancelDrag() return end
+    if input.IsKeyDown( KEY_ESCAPE ) then CancelDrag() return end
+
+    -- 拖动中按 R 旋转
+    local down = input.IsKeyDown( KEY_R )
+    if down and not rKeyDown then RotateDrag() end
+    rKeyDown = down
+
+    if not input.IsMouseDown( MOUSE_LEFT ) then FinishDrag() end
+end )
+
+-- 跟随鼠标的图标画在一个挂在界面最上层的覆盖面板里（见 inventory_cl_inventory_ui）。
+-- HUDPaint 会被 VGUI 面板盖住，所以不能用它画。
+function inventory_cl_paint_drag( pnl )
+    if not drag or not drag.def then return end
+
+    local mat = GetIcon( drag.def.icon )
+    if not mat then return end
+
+    -- 格宽优先跟随鼠标所在的容器（换容器时尺寸也正确），否则用来源面板的
+    local cell = drag.cell
+    local hp = ContainerPanelUnderCursor()
+    if hp then
+        local grid = INVENTORY[ hp.ContainerIndex ]
+        cell = GridCell( hp, hp:GetWide(), #grid ) or cell
+    end
+
+    local w, h = DragFootprint( drag )
+    local pw, ph = w * cell, h * cell
+
+    -- 图标中心始终对准鼠标
+    local mx, my = pnl:ScreenToLocal( gui.MouseX(), gui.MouseY() )
+    local x = mx - pw * 0.5
+    local y = my - ph * 0.5
+
+    surface.SetMaterial( mat )
+    surface.SetDrawColor( 255, 255, 255, 210 )
+
+    if drag.rot then
+        -- 旋转 90°：传入 (ph, pw) 让旋转后的包围盒正好是 pw x ph
+        surface.DrawTexturedRectRotated( x + pw * 0.5, y + ph * 0.5, ph, pw, 90 )
+    else
+        surface.DrawTexturedRect( x, y, pw, ph )
+    end
+end
+
 local function CreateContainerPanel( n )
     local pnl = vgui.Create("DPanel")
     pnl:Dock(TOP)
@@ -363,24 +565,59 @@ local function CreateContainerPanel( n )
             end
         end
 
-        -- 物品图标：只在锚点格画一次，按 X/Y 撑满整块区域
+        -- 物品图标：只在锚点格画一次；旋转的物品把图标也转 90°
         for x = 1, gw do
             local column = grid[x]
             for y = 1, gh do
-                local classname = column and column[y]
-                if type(classname) == "string" then
+                local classname, rot = CellItem( column and column[y] )
+                if classname then
                     local idef = ITEM_LIST[classname]
                     local mat = idef and GetIcon(idef.icon)
                     if mat then
+                        local w, h = ( idef and idef.X ) or 1, ( idef and idef.Y ) or 1
+                        if rot then w, h = h, w end
+
+                        local px = offsetX + (x - 1) * cell + 2
+                        local py = (y - 1) * cell + 2
+                        local pw = math.max(1, w * cell - 4)
+                        local ph = math.max(1, h * cell - 4)
+
                         surface.SetMaterial(mat)
                         surface.SetDrawColor(255, 255, 255, 255)
-                        surface.DrawTexturedRect(
-                            offsetX + (x - 1) * cell + 2,
-                            (y - 1) * cell + 2,
-                            math.max(1, (idef.X or 1) * cell - 4),
-                            math.max(1, (idef.Y or 1) * cell - 4)
-                        )
+
+                        if rot then
+                            -- 旋转 90°：传入 (ph, pw)，旋转后的包围盒正好是 pw x ph
+                            surface.DrawTexturedRectRotated( px + pw * 0.5, py + ph * 0.5, ph, pw, 90 )
+                        else
+                            surface.DrawTexturedRect( px, py, pw, ph )
+                        end
                     end
+                end
+            end
+        end
+
+        -- 拖拽时预览目标位置：可放蓝色，不可放红色
+        if drag and drag.def and ContainerPanelUnderCursor() == pnl then
+            local tx, ty = AnchorCellAtCursor( pnl, n, DragFootprint( drag ) )
+            if tx then
+                local ok = CanDropAt( n, tx, ty, drag )
+                local iw, ih = DragFootprint( drag )
+
+                -- 只画落在本容器内的部分，避免溢出到相邻面板
+                local x1, y1 = math.max( tx, 1 ), math.max( ty, 1 )
+                local x2, y2 = math.min( tx + iw - 1, gw ), math.min( ty + ih - 1, gh )
+                if x2 >= x1 and y2 >= y1 then
+                    if ok then
+                        surface.SetDrawColor( 120, 200, 255, 90 )
+                    else
+                        surface.SetDrawColor( 230, 80, 80, 100 )
+                    end
+                    surface.DrawRect(
+                        offsetX + ( x1 - 1 ) * cell + 2,
+                        ( y1 - 1 ) * cell + 2,
+                        math.max(1, ( x2 - x1 + 1 ) * cell - 4),
+                        math.max(1, ( y2 - y1 + 1 ) * cell - 4)
+                    )
                 end
             end
         end
@@ -428,10 +665,16 @@ local function CreateContainerPanel( n )
         end
     end
 
-    -- ④ 右键：只处理物品格；背包图标由 icon 子面板负责
+    -- ④ 左键拖动物品；右键弹菜单
     pnl.ContainerIndex = n
     pnl:SetMouseInputEnabled(true)
     pnl.OnMousePressed = function(self, key)
+        if key == MOUSE_LEFT then
+            local hit = ItemUnderCursor(self)
+            if hit then StartDrag(hit, self) end
+            return
+        end
+
         if key ~= MOUSE_RIGHT then return end
 
         local hit = ItemUnderCursor(self)
@@ -527,4 +770,13 @@ function inventory_cl_inventory_ui()
     inv_panels = {}
 
     inventory_cl_sync_containers()
+
+    -- 拖拽图标层：盖住整个界面（鼠标穿透），保证拖动的图标不会被面板挡住
+    local layer = vgui.Create( "DPanel", DermaPanel )
+    layer:SetPos( 0, 0 )
+    layer:SetSize( PANEL_W, PANEL_H )
+    layer:SetZPos( 1000 )
+    layer:SetMouseInputEnabled( false )
+    layer:SetKeyboardInputEnabled( false )
+    layer.Paint = inventory_cl_paint_drag
 end

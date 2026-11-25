@@ -56,7 +56,7 @@ end
 --如果在容器中丢弃物品则不要更新
 --最后统一在容器的函数中更新
 --remove会自动更新背包
-function ITEM:drop(UPDATE_dont)
+function ITEM:drop(UPDATE_dont,RETURN2BAG_dont)
     if SERVER then
         local pos = self.pos
         -- 没有坐标说明这个实例不属于任何背包；报错以追踪调用方问题
@@ -109,15 +109,18 @@ function ITEM:drop(UPDATE_dont)
         local dropPos = owner:EyePos() + fwd * 10 - Vector( 0, 0, 15 )
         for i = 1, #contents do
             local data = contents[i]
-            if not owner:InventoryAddItem( data, nil, nil, nil, true ) then
+            local rot = istable( data.pos ) and data.pos.r or false
+            if RETURN2BAG_dont or ( not owner:InventoryAddItem( data, nil, nil, nil, rot, true ) ) then
                 if not ITEM:Spawn( data, dropPos, eye, fwd * 5 ) then
-                    print( "item " .. tostring( data.classname ) .. " on container "
-                        .. tostring( self.classname ) .. " missing" )
+                    print( "item " .. tostring( data.classname ) .. " on container ".. tostring( self.classname ) .. " now missing" )
                 end
             end
         end
 
-        owner:UpDateINV( -1 )
+        if not UPDATE_dont then
+            owner:UpDateINV(-1)
+        end
+
         return true
     elseif CLIENT then
         self:Remove()
@@ -140,7 +143,9 @@ function ITEM:Remove(UPDATE_dont)
         container = true 
         sizeX , sizeY = self.DATA.container.X , self.DATA.container.Y
     else
-        sizeX , sizeY = self.X , self.Y
+        local w, h = self.X or 1, self.Y or 1
+        if pos.r then w, h = h, w end      -- 旋转后宽高互换
+        sizeX , sizeY = w , h
         posX , posY = self.pos.x , self.pos.y
     end
 
@@ -254,27 +259,51 @@ function ITEM:CallMethod( name )
     return false
 end
 
-function ITEM:move2( n, x, y )
+function ITEM:move2( n, x, y, r)
     local ply = SERVER and player.GetBySteamID64( self.OWNER ) or LocalPlayer()
     if not IsValid( ply ) then return false end
 
-    local old = { n = self.pos.n, x = self.pos.x, y = self.pos.y }   -- 值拷贝
-    local snapshot = table.Copy( self )                              -- 保留实例数据
+    local pos = self.pos
+    if not istable( pos ) then return false end
+
+    n, x, y = tonumber( n ), tonumber( x ), tonumber( y )
+    if not n or not x or not y then return false end
+
+    if r == nil then r = pos.r or false end     -- 不传朝向就保持原样
+    r = r and true or false
+
+    local old = { n = pos.n, x = pos.x, y = pos.y, r = pos.r and true or false }   -- 值拷贝
+    if old.n == n and old.x == x and old.y == y and old.r == r then return true end   -- 原地且朝向未变
+
+    local snapshot = table.Copy( self )               -- 保留实例数据
     snapshot.classname = self.classname
+    snapshot.pos = nil
 
+    -- 先腾出原位置：否则目标区域会被自己挡住，判定必然失败
     if self:Remove( true ) == false then return false end
-    if ply:InventoryAddItem( snapshot, n, x, y ) then return true end
 
-    if not ply:InventoryAddItem( snapshot, old.n, old.x, old.y ) then
+    if ply:InventoryAddItem( snapshot, n, x, y, r, true ) then
+        -- 跨容器移动时，源容器也要刷新，否则客户端会留着旧位置的图标
+        if SERVER and old.n ~= n then ply:UpDateINV( old.n ) end
+        return true
+    end
+
+    if not ply:InventoryAddItem( snapshot, old.n, old.x, old.y, old.r, false ) then
         print( "[new_moon_inventory] move2 回滚失败，物品 " .. tostring( self.classname ) .. " 丢失" )
     end
     return false
 end
 
+-- 拾取判定：显式返回 true / false。
+-- 必须显式 return true：调用方（服务端与客户端的 InventoryAddItem）都用
+-- `if not self:OnPickUp() then 拒绝 end`，返回 nil 会被当成拒绝。
 function ITEM:OnPickUp()
     if self.func and self.func.OnPickUp then
-        self.func.OnPickUp(self)
+        if not self.func.OnPickUp(self) then
+            return false
+        end
     end
+    return true
 end
 
 --物品类不存在则ITEM()不会返回对象
@@ -316,7 +345,7 @@ ITEM:new({
     ITEM_TYPE = "ITEM",
     DATA = {},
     func = {--代码用
-    OnPickUp = function(self) return end,--这是一个share的函数
+    OnPickUp = function(self) return true end,--这是一个share的函数
     },
     methon = {--ui中显示，左边是名称
     ["drop"] = {
@@ -369,7 +398,11 @@ ITEM:new({
     methon = {
     ["equip"] = {
         name = "装备",
-        share = function(self) self:Remove(true) end,
+        share = function(self)
+                if not self:Remove(true) then
+                    return false 
+                end
+            end,
         sv = function(self)
             local ply = player.GetBySteamID64(self.OWNER)
                 if ply then
@@ -387,7 +420,6 @@ ITEM:new({
     X = 2,
     Y = 2,
     func = {
-    OnPickUp = function(self)
-    end,
+    OnPickUp = function(self) return true end,
     },   
 })
