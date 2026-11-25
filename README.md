@@ -6,12 +6,14 @@ Use inv_open commend to open inventory ui
 
 To do:
 
-move item on inventory ui
+(done)move item on inventory ui
 
-item rotating
+(done)item rotating
 
-player sort container by hand
+(cancel)player sort container in manual
 
-nearby items on inventory ui
+(done)nearby items on inventory ui
+
+auto rendering model as icon
 
 code clean, it's too ai now
