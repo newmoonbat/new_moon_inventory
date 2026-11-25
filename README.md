@@ -6,9 +6,9 @@ Use inv_open commend to open inventory ui
 
 To do:
 
-move item on inventory ui
+(done)move item on inventory ui
 
-item rotating
+(done)item rotating
 
 player sort container by hand
 
