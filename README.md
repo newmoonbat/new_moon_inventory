@@ -10,9 +10,9 @@ To do:
 
 (done)item rotating
 
-player sort container by hand
+(cancel)player sort container in manual
 
-nearby items on inventory ui
+(done)nearby items on inventory ui
 
 auto rendering model as icon
 
