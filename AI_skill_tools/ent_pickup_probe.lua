@@ -247,6 +247,7 @@ INVENTORY = { [1] = EmptyGrid() }
 T.load_with("inventory/cl_ui.lua", [[
 _G.__PROBE = {
     DropLayout = DropLayout, DropView = DropView, DropHitTest = DropHitTest,
+    PICKUP_RANGE = PICKUP_RANGE,
     DropItems = DropItems, RefreshDropItems = RefreshDropItems,
     PredictPickupSlot = PredictPickupSlot, CanPredictPickup = CanPredictPickup,
     StartEntityDrag = StartEntityDrag, FinishEntityDrag = FinishEntityDrag,
@@ -316,7 +317,7 @@ do
     ply.pos = Vec( 0, 0, 0 )
     local near1 = NewEnt("item_1x1", Vec( 0, 0, 50 ) )    -- 50 单位：能捡
     local near2 = NewEnt("item_2x2", Vec( 60, 0, 0 ) )    -- 60 单位：能捡
-    local far   = NewEnt("item_1x1", Vec( 0, 0, 100 ) )   -- 100 单位：超出
+    local far   = NewEnt("item_1x1", Vec( 0, 0, 150 ) )   -- 150 单位：超出
     local unk   = NewEnt("item_nope", Vec( 0, 0, 10 ) )   -- 未注册类
     world = { near1, near2, far, unk }
 
@@ -324,6 +325,16 @@ do
     T.eq("只保留 72 单位内已注册的物品", #list, 2)
     T.eq("第一件", list[1].classname, "item_1x1")
     T.eq("第二件", list[2].classname, "item_2x2")
+end
+
+-- ===== 2b) 客户端拾取半径必须与服务端 PickUp 的阈值一致 =====
+do
+    local sf = assert(io.open(T.root() .. "autorun/server/inventory_sys_inventory.lua", "rb"))
+    local src = sf:read("*a")
+    sf:close()
+    local serverSqr = tonumber(src:match("DistToSqr%s*%(%s*entpos%s*%)%s*<=%s*(%d+)"))
+    T.ok("服务端 PickUp 的阈值能解析出来", serverSqr ~= nil, "serverSqr=" .. tostring(serverSqr))
+    T.eq("客户端拾取半径² = 服务端阈值", P.PICKUP_RANGE ^ 2, serverSqr)
 end
 
 -- ===== 3) DropHitTest 命中 + 网格居中 =====

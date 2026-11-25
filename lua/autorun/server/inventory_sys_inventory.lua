@@ -269,6 +269,9 @@ hook.Add("DoPlayerDeath", "inventory_sys_inventory_player_death", function( ply 
     local containers = {}
     for n = 1, #inv do containers[ #containers + 1 ] = inv[n] end
 
+    -- OnDrop 拒绝丢弃的物品：不落地，等新背包建好后放回去
+    local kept = {}
+
     -- 基础容器最后统一掉内容物，避免被上面的 drop 回填污染
     for i = 1, #containers do
         local container = containers[i]
@@ -279,7 +282,15 @@ hook.Add("DoPlayerDeath", "inventory_sys_inventory_player_death", function( ply 
                 for y = 1, #container[x] do
                     local cell = container[x][y]
                     if type( cell ) == "table" then
-                        ITEM:Spawn( table.Copy( cell ), pos, ang, Vector( 0, 0, 0 ) )
+                        -- 这条路径直接 Spawn，不经过 ITEM:drop，所以 OnDrop 要在这里单独判一次
+                        if cell.func and cell.func.OnDrop and not cell.func.OnDrop( cell ) then
+                            kept[ #kept + 1 ] = {
+                                data = table.Copy( cell ),
+                                rot  = istable( cell.pos ) and cell.pos.r or false,
+                            }
+                        else
+                            ITEM:Spawn( table.Copy( cell ), pos, ang, Vector( 0, 0, 0 ) )
+                        end
                     end
                 end
             end
@@ -288,6 +299,15 @@ hook.Add("DoPlayerDeath", "inventory_sys_inventory_player_death", function( ply 
 
     INVENTORY[ ply:SteamID64() ] = {}
     ply:CreateInventory( "container_base" )
+
+    -- 被 OnDrop 拦下的物品放回新背包；真放不下才退回落地，避免直接消失
+    for i = 1, #kept do
+        local k = kept[i]
+        if not ply:InventoryAddItem( k.data, nil, nil, nil, k.rot, true ) then
+            ITEM:Spawn( k.data, pos, ang, Vector( 0, 0, 0 ) )
+        end
+    end
+
     ply:UpDateINV( -1 )
 end)
 

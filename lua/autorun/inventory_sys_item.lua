@@ -78,6 +78,15 @@ function ITEM:drop(UPDATE_dont,RETURN2BAG_dont)
             if not col or col[pos.y] ~= self then return false end
         end
 
+        -- OnDrop 闸门：返回 false 就阻止这次丢弃。
+        -- 必须放在 Spawn 之前（否则拒绝时会留下世界里多出来的实体 = 复制物品），
+        -- 也必须在归属校验之后（上面两步都是纯读，先确认东西确实还在它声称的格子）。
+        if self.func and self.func.OnDrop then
+            if not self.func.OnDrop(self) then
+                return false
+            end
+        end
+
         local eye   = owner:EyeAngles()
         local fwd   = eye:Forward()
         local ent   = ITEM:Spawn(
@@ -123,6 +132,12 @@ function ITEM:drop(UPDATE_dont,RETURN2BAG_dont)
 
         return true
     elseif CLIENT then
+        if self.func and self.func.OnDrop then
+            if not self.func.OnDrop(self) then
+                return false
+            end
+        end
+
         self:Remove()
         return true
     end
@@ -345,7 +360,8 @@ ITEM:new({
     ITEM_TYPE = "ITEM",
     DATA = {},
     func = {--代码用
-    OnPickUp = function(self) return true end,--这是一个share的函数
+    OnPickUp = function(self) return true end,--这是share的函数
+    OnDrop = function(self) return true end,
     },
     methon = {--ui中显示，左边是名称
     ["drop"] = {

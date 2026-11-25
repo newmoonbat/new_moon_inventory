@@ -426,7 +426,7 @@ end
 -- 服务端已有 PickUp opration：{ index = 实体索引 }，内部走 ENT:Use →
 -- InventoryAddItem(classname)，也就是"自动找第一个空位"，不接收指定格子。
 -- 所以这里的预测和预览都用同一套自动找位，保证客户端预览 = 服务端落点。
-local PICKUP_RANGE      = 104                     -- 与服务端 PickUp 的 72 单位一致
+local PICKUP_RANGE      = 104                     -- 与服务端 PickUp 的 104 单位一致（probe 里有跨文件校验）
 local PICKUP_HIDE_TIME  = 2                       -- 发包后先把实体藏这么久
 local DROP_REFRESH      = 0.25                    -- 实体列表的刷新间隔
 
