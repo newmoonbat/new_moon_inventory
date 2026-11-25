@@ -14,4 +14,6 @@ player sort container by hand
 
 nearby items on inventory ui
 
+auto rendering model as icon
+
 code clean, it's too ai now
